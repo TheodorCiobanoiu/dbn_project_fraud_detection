@@ -1,4 +1,5 @@
-import matplotlib.pyplot as plt
+import time
+
 import pandas as pd
 from scikeras.wrappers import KerasClassifier
 from sklearn.metrics import classification_report, roc_auc_score, precision_recall_curve, auc
@@ -39,57 +40,74 @@ def build_dbn_model(input_shape):
     model.compile(
         optimizer=Adam(learning_rate=0.0001),
         loss='binary_crossentropy',
-        metrics=['accuracy'])
+        metrics=['accuracy']
+    )
     return model
 
 
+print("Cross-Validation process started")
 # KerasClassifier for cross-validation
 model_cv = KerasClassifier(
     build_fn=lambda: build_dbn_model((X_train.shape[1],)),
     epochs=100,
-    batch_size=4000,
-    verbose=0)
+    batch_size=7500,
+    verbose=0
+)
 
 # KFold cross-validation
-k_fold = KFold(
-    n_splits=5,
-    shuffle=True,
-    random_state=42)
-results = cross_val_score(model_cv, X_train, y_train, cv=k_fold)
-print("Cross-Validation Accuracy: %.2f%% (%.2f%%)" % (results.mean() * 100, results.std() * 100))
+k_fold = KFold(n_splits=5,
+               shuffle=True,
+               random_state=42
+               )
+cv_results = cross_val_score(model_cv, X_train, y_train, cv=k_fold)
+print("Cross-Validation process finished")
 
-# Early Stopping and ReduceLROnPlateau callbacks
-early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=20, min_lr=0.00001)
-
-# Train the model with the whole training set
+start_training_time = time.time()
+# Train and evaluate the model
 dbn_model = build_dbn_model((X_train.shape[1],))
-dbn_model.fit(
-    X_train,
-    y_train,
-    epochs=1000,
-    batch_size=6000,
-    validation_data=(X_val, y_val),
-    callbacks=[early_stopping, reduce_lr]
+early_stopping = EarlyStopping(
+    monitor='val_loss',
+    patience=50,
+    restore_best_weights=True
 )
-# Evaluate the model on the validation set with custom threshold
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.2,
+    patience=20,
+    min_lr=0.00001)
+dbn_model.fit(X_train, y_train,
+              epochs=400,
+              batch_size=2000,
+              validation_data=(X_val, y_val),
+              callbacks=[early_stopping, reduce_lr]
+              )
+end_training_time = time.time()
+training_time = end_training_time - start_training_time
+
 threshold = 0.8
 y_val_probs = dbn_model.predict(X_val)
 y_val_pred = (y_val_probs > threshold).astype(int)
+
+# Metrics calculation
+classification_rep = classification_report(y_val, y_val_pred, output_dict=True)
+roc_auc = roc_auc_score(y_val, y_val_probs)
+precision, recall, _ = precision_recall_curve(y_val, y_val_probs)
+auc_pr = auc(recall, precision)
+
+print("Cross-Validation Accuracy: %.2f%% (%.2f%%)" % (cv_results.mean() * 100, cv_results.std() * 100))
 print("Classification report at threshold", threshold)
 print(classification_report(y_val, y_val_pred))
-print("ROC AUC Score:", roc_auc_score(y_val, y_val_probs))
+print("ROC AUC Score:", roc_auc)
+print("Precision-Recall AUC:", auc_pr)
+print(training_time)
 
-# Precision-Recall Curve
-precision, recall, _ = precision_recall_curve(y_val, y_val_probs)
-plt.figure()
-plt.plot(recall, precision, marker='.', label='DBN')
-plt.xlabel('Recall')
-plt.ylabel('Precision')
-plt.title('Precision-Recall curve')
-plt.legend()
-plt.show()
-
-# Calculating AUC for Precision-Recall Curve
-auc_score = auc(recall, precision)
-print("Precision-Recall AUC:", auc_score)
+report_df = pd.DataFrame(classification_rep).transpose()
+with (pd.ExcelWriter('model_evaluation.xlsx') as writer):
+    report_df.to_excel(writer, sheet_name='Classification Report')
+    pd.DataFrame({
+        'Precision-Recall AUC': [auc_pr],
+        'ROC AUC Score': [roc_auc],
+        # 'Cross-Validation Accuracy': [cv_results.mean()],
+        'Training time': [training_time],
+    }).to_excel(writer, sheet_name='Other Metrics', index=False)
+print("Results saved to Excel file.")
